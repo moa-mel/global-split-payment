@@ -1,44 +1,63 @@
 
+# ==========================================
+# BUILD STAGE
+# ==========================================
+FROM node:22-alpine AS build
 
-FROM node:22-alpine as build
 WORKDIR /usr/src/app
 
-# Fake DB URL ONLY for Prisma Client generation
-ENV DATABASE_URL="postgresql://postgres.nwvywjysuwvmdkkelude:4oDKBmC3ESNCv0Zx@aws-1-eu-west-1.pooler.supabase.com:5432/postgres"
+# Dummy URL used only during Prisma Client generation.
+# The actual database URL is injected at runtime.
+ENV DATABASE_URL="postgresql://build:build@localhost:5432/splitflow"
 
-# Install all deps (including dev) to allow prisma generate and build
-COPY ./package*.json ./
-RUN npm install
+# Install dependencies using the lockfile
+COPY package.json package-lock.json ./
+RUN npm ci
 
-# Copy prisma files and config for generate
+# Copy Prisma configuration and schema
 COPY prisma ./prisma
 COPY prisma.config.ts ./prisma.config.ts
 
-# Copy the rest of the source and build
+# Copy backend source and configuration
 COPY . .
+
+# Generate Prisma Client
 RUN npx prisma generate
+
+# Compile NestJS
 RUN npm run build
 
 
-FROM node:22-alpine as production
-ENV TZ=Africa/Lagos
+# ==========================================
+# PRODUCTION STAGE
+# ==========================================
+FROM node:22-alpine AS production
+
 ENV NODE_ENV=production
+ENV TZ=Africa/Lagos
+
 WORKDIR /usr/src/app
 
-# Only install production dependencies
-COPY ./package*.json ./
-RUN npm install --omit=dev --ignore-scripts
+# OpenSSL support for Prisma
+RUN apk add --no-cache openssl
 
-# Copy prisma schema (optional at runtime) and the generated Prisma client from build stage
-COPY ./prisma ./prisma
+# Install production dependencies
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts
+
+# Copy Prisma schema and configuration
+COPY prisma ./prisma
 COPY prisma.config.ts ./prisma.config.ts
-COPY --from=build /usr/src/app/node_modules/.prisma /usr/src/app/node_modules/.prisma
-COPY --from=build /usr/src/app/node_modules/@prisma /usr/src/app/node_modules/@prisma
-COPY --from=build /usr/src/app/node_modules/@prisma/client /usr/src/app/node_modules/@prisma/client
 
-# Copy the compiled application
+# Copy generated Prisma Client
+COPY --from=build /usr/src/app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=build /usr/src/app/node_modules/@prisma/client ./node_modules/@prisma/client
+
+# Copy compiled NestJS application
 COPY --from=build /usr/src/app/dist ./dist
 
-# Start the app
-CMD ["node", "dist/src/main.js"]
+# Backend listens on port 4000
+EXPOSE 4000
 
+# Start NestJS
+CMD ["node", "dist/src/main.js"]
