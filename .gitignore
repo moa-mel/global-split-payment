@@ -7,3 +7,6 @@ coverage
 *.log
 .DS_Store
 backend/prisma/*.db
+
+/generated/prisma
+/prisma/migrations
