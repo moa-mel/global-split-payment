@@ -1,0 +1,107 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum GroupStatus {
+  DRAFT
+  COLLECTING
+  FUNDED
+  DISTRIBUTING
+  COMPLETED
+  CANCELLED
+}
+
+enum ContributionStatus {
+  PENDING
+  PAID
+  FAILED
+}
+
+enum TransferStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+}
+
+model User {
+  id        String   @id @default(cuid())
+  name      String
+  email     String   @unique
+  createdAt DateTime @default(now())
+  groups    PaymentGroup[] @relation("GroupOwner")
+}
+
+model PaymentGroup {
+  id             String      @id @default(cuid())
+  name           String
+  description    String?
+  currency       String      @default("NGN")
+  targetAmount   BigInt
+  status         GroupStatus @default(DRAFT)
+  ownerId        String
+  owner          User        @relation("GroupOwner", fields: [ownerId], references: [id])
+  contributions  Contribution[]
+  recipients     Recipient[]
+  allocations    Allocation[]
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+}
+
+model Contribution {
+  id             String @id @default(cuid())
+  groupId        String
+  group          PaymentGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  contributorName String
+  contributorEmail String?
+  amount         BigInt
+  paidAmount     BigInt @default(0)
+  status         ContributionStatus @default(PENDING)
+  createdAt      DateTime @default(now())
+}
+
+model Recipient {
+  id          String @id @default(cuid())
+  groupId     String
+  group       PaymentGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+  allocations Allocation[]
+}
+
+model Allocation {
+  id          String @id @default(cuid())
+  groupId     String
+  group       PaymentGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  recipientId String
+  recipient   Recipient @relation(fields: [recipientId], references: [id], onDelete: Cascade)
+  amount      BigInt
+  createdAt   DateTime @default(now())
+}
+
+model Transfer {
+  id          String @id @default(cuid())
+  groupId     String
+  recipientId String
+  amount      BigInt
+  status      TransferStatus @default(PENDING)
+  idempotencyKey String @unique
+  providerReference String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model LedgerEntry {
+  id          String   @id @default(cuid())
+  groupId     String
+  type        String
+  amount      BigInt
+  reference   String
+  description String
+  createdAt   DateTime @default(now())
+}
