@@ -1,11 +1,14 @@
-
 import { Module } from '@nestjs/common';
-import { PayoutsController } from './payouts.controller';
 import { PayoutsService } from './payouts.service';
+import { PayoutsController } from './payouts.controller';
+import { PaymentsModule } from '../payments/payments.module';
 import { LedgerModule } from '../ledger/ledger.module';
 
 @Module({
-  imports: [LedgerModule],
+  imports: [
+    LedgerModule,
+    PaymentsModule,
+  ],
   controllers: [PayoutsController],
   providers: [PayoutsService],
   exports: [PayoutsService],
