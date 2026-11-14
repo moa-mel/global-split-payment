@@ -6,102 +6,205 @@ datasource db {
   provider = "postgresql"
 }
 
-enum GroupStatus {
-  DRAFT
-  COLLECTING
-  FUNDED
-  DISTRIBUTING
-  COMPLETED
-  CANCELLED
+enum BeneficiaryType {
+  SELLER
+  PLATFORM
+  DELIVERY
+  PARTNER
+  OTHER
 }
 
-enum ContributionStatus {
-  PENDING
-  PAID
-  FAILED
+enum SplitType {
+  PERCENTAGE
+  FIXED
 }
 
-enum TransferStatus {
+enum PaymentStatus {
   PENDING
   PROCESSING
-  SUCCEEDED
+  SUCCESSFUL
   FAILED
+  REFUNDED
 }
 
-model User {
-  id        String   @id @default(cuid())
-  name      String
-  email     String   @unique
+enum PayoutStatus {
+  PENDING
+  PROCESSING
+  SUCCESSFUL
+  FAILED
+  REVERSED
+}
+
+enum LedgerEntryType {
+  PAYMENT_RECEIVED
+  PAYOUT_INITIATED
+  PAYOUT_COMPLETED
+  PAYOUT_FAILED
+  REFUND
+  FEE
+}
+
+model Merchant {
+  id           String  @id @default(cuid())
+  name         String
+  email        String  @unique
+  businessName String?
+  currency     String  @default("NGN")
+
+  beneficiaries Beneficiary[]
+  splitRules    SplitRule[]
+  payments      Payment[]
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+}
+
+model Beneficiary {
+  id         String   @id @default(cuid())
+  merchantId String
+  merchant   Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  name  String
+  email String?
+  type  BeneficiaryType @default(OTHER)
+
+  bankCode            String?
+  accountNumber       String?
+  accountName         String?
+  providerRecipientId String?
+
+  isActive Boolean @default(true)
+
+  splitRules    SplitRuleItem[]
+  distributions Distribution[]
+
+  paystackSubaccountCode String? @unique
+
   createdAt DateTime @default(now())
-  groups    PaymentGroup[] @relation("GroupOwner")
+  updatedAt DateTime @updatedAt
+
+  @@index([merchantId])
 }
 
-model PaymentGroup {
-  id             String      @id @default(cuid())
-  name           String
-  description    String?
-  currency       String      @default("NGN")
-  targetAmount   BigInt
-  status         GroupStatus @default(DRAFT)
-  ownerId        String
-  owner          User        @relation("GroupOwner", fields: [ownerId], references: [id])
-  contributions  Contribution[]
-  recipients     Recipient[]
-  allocations    Allocation[]
-  createdAt      DateTime    @default(now())
-  updatedAt      DateTime    @updatedAt
-}
+model SplitRule {
+  id         String   @id @default(cuid())
+  merchantId String
+  merchant   Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
 
-model Contribution {
-  id             String @id @default(cuid())
-  groupId        String
-  group          PaymentGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  contributorName String
-  contributorEmail String?
-  amount         BigInt
-  paidAmount     BigInt @default(0)
-  status         ContributionStatus @default(PENDING)
-  createdAt      DateTime @default(now())
-}
-
-model Recipient {
-  id          String @id @default(cuid())
-  groupId     String
-  group       PaymentGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
   name        String
   description String?
-  createdAt   DateTime @default(now())
-  allocations Allocation[]
+  currency    String
+  isActive    Boolean @default(true)
+  version     Int     @default(1)
+
+  items    SplitRuleItem[]
+  payments Payment[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([merchantId])
 }
 
-model Allocation {
-  id          String @id @default(cuid())
-  groupId     String
-  group       PaymentGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  recipientId String
-  recipient   Recipient @relation(fields: [recipientId], references: [id], onDelete: Cascade)
-  amount      BigInt
-  createdAt   DateTime @default(now())
+model SplitRuleItem {
+  id          String    @id @default(cuid())
+  splitRuleId String
+  splitRule   SplitRule @relation(fields: [splitRuleId], references: [id], onDelete: Cascade)
+
+  beneficiaryId String
+  beneficiary   Beneficiary @relation(fields: [beneficiaryId], references: [id])
+
+  type     SplitType
+  value    BigInt
+  priority Int       @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([splitRuleId])
+  @@index([beneficiaryId])
 }
 
-model Transfer {
-  id          String @id @default(cuid())
-  groupId     String
-  recipientId String
-  amount      BigInt
-  status      TransferStatus @default(PENDING)
-  idempotencyKey String @unique
-  providerReference String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+model Payment {
+  id         String   @id @default(cuid())
+  merchantId String
+  merchant   Merchant @relation(fields: [merchantId], references: [id])
+
+  splitRuleId String
+  splitRule   SplitRule @relation(fields: [splitRuleId], references: [id])
+
+  reference         String  @unique
+  providerReference String? @unique
+  provider          String
+
+  amount   BigInt
+  currency String
+  status   PaymentStatus @default(PENDING)
+
+  customerEmail String?
+  checkoutUrl   String?
+
+  distributions      Distribution[]
+  ledgerEntries      LedgerEntry[]
+  paystackAccessCode String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([merchantId])
+  @@index([status])
+}
+
+model Distribution {
+  id        String  @id @default(cuid())
+  paymentId String
+  payment   Payment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  beneficiaryId String
+  beneficiary   Beneficiary @relation(fields: [beneficiaryId], references: [id])
+
+  amount   BigInt
+  currency String
+  status   PayoutStatus @default(PENDING)
+
+  providerReference String? @unique
+  idempotencyKey    String  @unique
+
+  failureReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([paymentId])
+  @@index([beneficiaryId])
+  @@index([status])
 }
 
 model LedgerEntry {
-  id          String   @id @default(cuid())
-  groupId     String
-  type        String
+  id        String  @id @default(cuid())
+  paymentId String
+  payment   Payment @relation(fields: [paymentId], references: [id])
+
+  type        LedgerEntryType
   amount      BigInt
+  currency    String
   reference   String
-  description String
-  createdAt   DateTime @default(now())
+  description String?
+
+  createdAt DateTime @default(now())
+
+  @@index([paymentId])
+  @@index([reference])
+}
+
+model WebhookEvent {
+  id          String    @id @default(cuid())
+  provider    String
+  eventId     String
+  eventType   String
+  payload     Json
+  processed   Boolean   @default(false)
+  processedAt DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@unique([provider, eventId])
 }

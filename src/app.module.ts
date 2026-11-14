@@ -5,6 +5,16 @@ import { AiModule } from './ai/ai.module';
 import { IntelligenceModule } from './intelligence/intelligence.module';
 
 @Module({
-  imports: [PrismaModule, GroupsModule, AiModule, IntelligenceModule],
+  imports: [
+    PrismaModule,
+    MerchantsModule,
+    BeneficiariesModule,
+    SplitRulesModule,
+    PaymentsModule,
+    PayoutsModule,
+    LedgerModule,
+    AiModule,
+    IntelligenceModule,
+  ],
 })
 export class AppModule {}
