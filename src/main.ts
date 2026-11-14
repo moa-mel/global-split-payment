@@ -8,6 +8,7 @@ async function bootstrap() {
   const allowedOrigins = [
     'http://localhost:5173',
     'http://localhost:3000',
+    'https://split-payment-frontend.onrender.com',
     process.env.FRONTEND_URL,
   ].filter((origin): origin is string => Boolean(origin));
 
