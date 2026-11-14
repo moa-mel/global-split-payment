@@ -15,6 +15,24 @@ export class SplitRulesService {
     private readonly calculator: SplitCalculatorService,
   ) { }
 
+  private serializeRule<
+    T extends {
+      items: Array<{
+        type: string;
+        value: bigint;
+      }>;
+    },
+  >(rule: T) {
+    return {
+      ...rule,
+      items: rule.items.map(({ type, value, ...item }) => ({
+        ...item,
+        splitType: type,
+        value: Number(value),
+      })),
+    };
+  }
+
   async create(merchantId: string, dto: CreateSplitRuleDto) {
     const merchant = await this.prisma.merchant.findUnique({
       where: { id: merchantId },
@@ -114,7 +132,7 @@ export class SplitRulesService {
       }
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const rule = await this.prisma.$transaction(async (tx) => {
       const latest = await tx.splitRule.findFirst({
         where: { merchantId },
         orderBy: {
@@ -158,10 +176,12 @@ export class SplitRulesService {
         },
       });
     });
+
+    return this.serializeRule(rule);
   }
 
   async findAll(merchantId: string) {
-    return this.prisma.splitRule.findMany({
+    const rules = await this.prisma.splitRule.findMany({
       where: { merchantId },
       include: {
         items: {
@@ -174,6 +194,8 @@ export class SplitRulesService {
         version: 'desc',
       },
     });
+
+    return rules.map((rule) => this.serializeRule(rule));
   }
 
   async findActive(merchantId: string) {
@@ -192,12 +214,10 @@ export class SplitRulesService {
     });
 
     if (!rule) {
-      throw new NotFoundException(
-        'No active split rule found',
-      );
+      throw new NotFoundException('No active split rule found');
     }
 
-    return rule;
+    return this.serializeRule(rule);
   }
 
   async preview(
