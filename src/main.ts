@@ -1,24 +1,31 @@
-import 'dotenv/config';
-import { ValidationPipe } from '@nestjs/common';
+
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, {
-    rawBody: true,
-  });
-  app.setGlobalPrefix('api');
+  const app = await NestFactory.create(AppModule);
+
+  const allowedOrigins = [
+    'http://localhost:5173',
+    'http://localhost:3000',
+    process.env.FRONTEND_URL,
+  ].filter((origin): origin is string => Boolean(origin));
+
   app.enableCors({
-    origin: process.env.FRONTEND_URL ?? 'http://localhost:3000',
+    origin: allowedOrigins,
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'Accept',
+      'Origin',
+    ],
     credentials: true,
   });
-  app.useGlobalPipes(new ValidationPipe({
-    whitelist: true,
-    transform: true,
-    forbidNonWhitelisted: true,
-  }));
-  const port = Number(process.env.PORT ?? 4000);
-  await app.listen(port);
-  console.log(`SplitFlow API running at http://localhost:${port}/api`);
+
+  app.setGlobalPrefix('api');
+
+  await app.listen(process.env.PORT ?? 3000, '0.0.0.0');
 }
+
 bootstrap();
