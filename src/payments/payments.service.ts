@@ -1,6 +1,7 @@
 
 import {
   BadRequestException,
+  Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -18,6 +19,7 @@ import { CreatePaymentDto } from './dtos/create-payment.dto';
 import {
   PaymentProvider,
   CheckoutRequest,
+  PAYMENT_PROVIDER,
 } from './payment-provider.interface';
 
 @Injectable()
@@ -26,8 +28,10 @@ export class PaymentsService {
     private readonly prisma: PrismaService,
     private readonly calculator: SplitCalculatorService,
     private readonly ledger: LedgerService,
-    private readonly provider: PaymentProvider,
-  ) {}
+
+    @Inject(PAYMENT_PROVIDER)
+    private readonly paymentProvider: PaymentProvider,
+  ) { }
 
   async create(merchantId: string, dto: CreatePaymentDto) {
     const merchant = await this.prisma.merchant.findUnique({
@@ -52,31 +56,31 @@ export class PaymentsService {
 
     const rule = dto.splitRuleId
       ? await this.prisma.splitRule.findFirst({
-          where: {
-            id: dto.splitRuleId,
-            merchantId,
-          },
-          include: {
-            items: {
-              include: {
-                beneficiary: true,
-              },
+        where: {
+          id: dto.splitRuleId,
+          merchantId,
+        },
+        include: {
+          items: {
+            include: {
+              beneficiary: true,
             },
           },
-        })
+        },
+      })
       : await this.prisma.splitRule.findFirst({
-          where: {
-            merchantId,
-            isActive: true,
-          },
-          include: {
-            items: {
-              include: {
-                beneficiary: true,
-              },
+        where: {
+          merchantId,
+          isActive: true,
+        },
+        include: {
+          items: {
+            include: {
+              beneficiary: true,
             },
           },
-        });
+        },
+      });
 
     if (!rule || rule.items.length === 0) {
       throw new BadRequestException(
@@ -165,7 +169,7 @@ export class PaymentsService {
         currency: dto.currency.toUpperCase(),
         customerEmail: dto.customerEmail,
         description: dto.description,
-        provider: this.provider.name,
+        provider: PAYMENT_PROVIDER,
         status: PaymentStatus.PENDING,
       },
     });
@@ -196,7 +200,7 @@ export class PaymentsService {
       };
 
       const checkout =
-        await this.provider.createCheckout(checkoutRequest);
+        await this.paymentProvider.createCheckout(checkoutRequest);
 
       return this.prisma.payment.update({
         where: { id: payment.id },
@@ -228,7 +232,7 @@ export class PaymentsService {
     }
 
     const verified =
-      await this.provider.verifyTransaction(reference);
+      await this.paymentProvider.verifyTransaction(reference);
 
     if (verified.status !== 'success') {
       throw new BadRequestException(
