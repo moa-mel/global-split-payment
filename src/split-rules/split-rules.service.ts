@@ -24,19 +24,80 @@ export class SplitRulesService {
       throw new NotFoundException('Merchant not found');
     }
 
-    const beneficiaryIds = dto.items.map((item) => item.beneficiaryId);
-
-    if (new Set(beneficiaryIds).size !== beneficiaryIds.length) {
-      throw new BadRequestException('Duplicate beneficiaries are not allowed');
+    if (!dto.items || dto.items.length === 0) {
+      throw new BadRequestException(
+        'At least one split allocation is required',
+      );
     }
 
-    const beneficiaries = await this.prisma.beneficiary.findMany({
-      where: {
-        merchantId,
-        id: { in: beneficiaryIds },
-        isActive: true,
-      },
-    });
+    const beneficiaryIds = dto.items.map(
+      (item) => item.beneficiaryId,
+    );
+
+    if (
+      new Set(beneficiaryIds).size !== beneficiaryIds.length
+    ) {
+      throw new BadRequestException(
+        'Duplicate beneficiaries are not allowed',
+      );
+    }
+
+    // Validate individual split values before performing calculations.
+    for (const item of dto.items) {
+      if (
+        !['PERCENTAGE', 'FIXED'].includes(item.splitType) ||
+        !Number.isSafeInteger(item.value) ||
+        item.value <= 0
+      ) {
+        throw new BadRequestException(
+          'Every split item must have a valid split type and positive integer value',
+        );
+      }
+    }
+
+    const splitTypes = new Set(
+      dto.items.map((item) => item.splitType),
+    );
+
+    if (splitTypes.size !== 1) {
+      throw new BadRequestException(
+        'A Paystack split rule must use either percentage or fixed allocations, not both',
+      );
+    }
+
+    const splitType = dto.items[0].splitType;
+
+    if (splitType === 'PERCENTAGE') {
+      const percentageTotal = dto.items.reduce(
+        (sum, item) => sum + item.value,
+        0,
+      );
+
+      if (percentageTotal > 10000) {
+        throw new BadRequestException(
+          'Percentage allocations cannot exceed 100%',
+        );
+      }
+
+      if (
+        dto.items.some((item) => item.value % 100 !== 0)
+      ) {
+        throw new BadRequestException(
+          'Paystack percentage allocations must be whole percentages',
+        );
+      }
+    }
+
+    const beneficiaries =
+      await this.prisma.beneficiary.findMany({
+        where: {
+          merchantId,
+          id: {
+            in: beneficiaryIds,
+          },
+          isActive: true,
+        },
+      });
 
     if (beneficiaries.length !== beneficiaryIds.length) {
       throw new BadRequestException(
@@ -44,59 +105,32 @@ export class SplitRulesService {
       );
     }
 
-    const percentageTotal = dto.items
-      .filter((item) => item.splitType === 'PERCENTAGE')
-      .reduce((sum, item) => sum + item.value, 0);
-
-    if (percentageTotal > 10000) {
-      throw new BadRequestException(
-        'Percentage allocations cannot exceed 100%',
-      );
-    }
-
-    if (
-      dto.items.some(
-        (item) =>
-          !['PERCENTAGE', 'FIXED'].includes(item.splitType) ||
-          !Number.isInteger(item.value) ||
-          item.value <= 0,
-      )
-    ) {
-      throw new BadRequestException('Invalid split item');
-    }
-
-    const splitTypes = new Set(
-      dto.items.map((item) => item.splitType),
-    );
-
-    if (splitTypes.size > 1) {
-      throw new BadRequestException(
-        'A Paystack split rule must use either percentage or fixed allocations, not both',
-      );
-    }
-
-    if (
-      dto.items.some(
-        (item) =>
-          item.splitType === 'PERCENTAGE' &&
-          item.value % 100 !== 0,
-      )
-    ) {
-      throw new BadRequestException(
-        'Paystack percentage allocations must be whole percentages',
-      );
+    // Paystack subaccount splitting requires registered subaccounts.
+    for (const beneficiary of beneficiaries) {
+      if (!beneficiary.paystackSubaccountCode) {
+        throw new BadRequestException(
+          `${beneficiary.name} has not been registered as a Paystack subaccount`,
+        );
+      }
     }
 
     return this.prisma.$transaction(async (tx) => {
       const latest = await tx.splitRule.findFirst({
         where: { merchantId },
-        orderBy: { version: 'desc' },
+        orderBy: {
+          version: 'desc',
+        },
       });
 
-      // Rules are versioned. Creating a new one does not rewrite old payments.
+      // Deactivate the previous active rule.
       await tx.splitRule.updateMany({
-        where: { merchantId, isActive: true },
-        data: { isActive: false },
+        where: {
+          merchantId,
+          isActive: true,
+        },
+        data: {
+          isActive: false,
+        },
       });
 
       return tx.splitRule.create({
@@ -104,18 +138,23 @@ export class SplitRulesService {
           merchantId,
           name: dto.name,
           description: dto.description,
+          currency: merchant.currency,
           version: (latest?.version ?? 0) + 1,
           isActive: true,
           items: {
             create: dto.items.map((item) => ({
               beneficiaryId: item.beneficiaryId,
-              splitType: item.splitType,
-              value: item.value,
+              type: item.splitType,
+              value: BigInt(item.value),
             })),
           },
         },
         include: {
-          items: { include: { beneficiary: true } },
+          items: {
+            include: {
+              beneficiary: true,
+            },
+          },
         },
       });
     });
@@ -124,19 +163,38 @@ export class SplitRulesService {
   async findAll(merchantId: string) {
     return this.prisma.splitRule.findMany({
       where: { merchantId },
-      include: { items: { include: { beneficiary: true } } },
-      orderBy: { version: 'desc' },
+      include: {
+        items: {
+          include: {
+            beneficiary: true,
+          },
+        },
+      },
+      orderBy: {
+        version: 'desc',
+      },
     });
   }
 
   async findActive(merchantId: string) {
     const rule = await this.prisma.splitRule.findFirst({
-      where: { merchantId, isActive: true },
-      include: { items: { include: { beneficiary: true } } },
+      where: {
+        merchantId,
+        isActive: true,
+      },
+      include: {
+        items: {
+          include: {
+            beneficiary: true,
+          },
+        },
+      },
     });
 
     if (!rule) {
-      throw new NotFoundException('No active split rule found');
+      throw new NotFoundException(
+        'No active split rule found',
+      );
     }
 
     return rule;
@@ -147,13 +205,37 @@ export class SplitRulesService {
     splitRuleId: string,
     amount: number,
   ) {
+    if (
+      !Number.isSafeInteger(amount) ||
+      amount <= 0
+    ) {
+      throw new BadRequestException(
+        'Payment amount must be a positive safe integer',
+      );
+    }
+
     const rule = await this.prisma.splitRule.findFirst({
-      where: { id: splitRuleId, merchantId },
-      include: { items: { include: { beneficiary: true } } },
+      where: {
+        id: splitRuleId,
+        merchantId,
+      },
+      include: {
+        items: {
+          include: {
+            beneficiary: true,
+          },
+        },
+      },
     });
 
     if (!rule) {
       throw new NotFoundException('Split rule not found');
+    }
+
+    if (rule.items.length === 0) {
+      throw new BadRequestException(
+        'Split rule has no allocations',
+      );
     }
 
     const allocations = this.calculator.calculate(
@@ -161,8 +243,8 @@ export class SplitRulesService {
       rule.items.map((item) => ({
         beneficiaryId: item.beneficiaryId,
         beneficiaryName: item.beneficiary.name,
-        splitType: item.splitType,
-        value: item.value,
+        splitType: item.type,
+        value: Number(item.value),
       })),
     );
 
@@ -171,10 +253,22 @@ export class SplitRulesService {
       0n,
     );
 
+    const paymentAmount = BigInt(amount);
+    const merchantRemainder = paymentAmount - allocated;
+
+    if (merchantRemainder < 0n) {
+      throw new BadRequestException(
+        'Split allocations exceed the payment amount',
+      );
+    }
+
     return {
-      paymentAmount: amount,
+      splitRuleId: rule.id,
+      splitRuleName: rule.name,
+      paymentAmount: paymentAmount.toString(),
       allocatedAmount: allocated.toString(),
-      merchantRemainder: (BigInt(amount) - allocated).toString(),
+      merchantRemainder: merchantRemainder.toString(),
+      currency: rule.currency,
       allocations: allocations.map((item) => ({
         beneficiaryId: item.beneficiaryId,
         beneficiaryName: item.beneficiaryName,

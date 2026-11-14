@@ -1,21 +1,24 @@
 
 import {
-  ArrayMinSize,
   IsArray,
+  IsEnum,
   IsInt,
+  IsNotEmpty,
   IsOptional,
   IsString,
   Min,
   ValidateNested,
 } from 'class-validator';
 import { Type } from 'class-transformer';
+import { SplitType } from '@prisma/client';
 
-class SplitRuleItemDto {
+export class CreateSplitRuleItemDto {
   @IsString()
+  @IsNotEmpty()
   beneficiaryId: string;
 
-  @IsString()
-  splitType: 'PERCENTAGE' | 'FIXED';
+  @IsEnum(SplitType)
+  splitType: SplitType;
 
   @IsInt()
   @Min(1)
@@ -24,6 +27,7 @@ class SplitRuleItemDto {
 
 export class CreateSplitRuleDto {
   @IsString()
+  @IsNotEmpty()
   name: string;
 
   @IsOptional()
@@ -31,8 +35,7 @@ export class CreateSplitRuleDto {
   description?: string;
 
   @IsArray()
-  @ArrayMinSize(1)
   @ValidateNested({ each: true })
-  @Type(() => SplitRuleItemDto)
-  items: SplitRuleItemDto[];
+  @Type(() => CreateSplitRuleItemDto)
+  items: CreateSplitRuleItemDto[];
 }

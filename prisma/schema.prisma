@@ -37,6 +37,7 @@ enum PayoutStatus {
 
 enum LedgerEntryType {
   PAYMENT_RECEIVED
+  SPLIT_ALLOCATED
   PAYOUT_INITIATED
   PAYOUT_COMPLETED
   PAYOUT_FAILED
@@ -56,6 +57,7 @@ model Merchant {
   payments      Payment[]
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt
+  payouts       Payout[]
 }
 
 model Beneficiary {
@@ -67,6 +69,7 @@ model Beneficiary {
   email String?
   type  BeneficiaryType @default(OTHER)
 
+  bankName            String?
   bankCode            String?
   accountNumber       String?
   accountName         String?
@@ -76,6 +79,7 @@ model Beneficiary {
 
   splitRules    SplitRuleItem[]
   distributions Distribution[]
+  payouts       Payout[]
 
   paystackSubaccountCode String? @unique
 
@@ -145,6 +149,8 @@ model Payment {
   distributions      Distribution[]
   ledgerEntries      LedgerEntry[]
   paystackAccessCode String?
+  description        String?
+  paidAt             DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -161,22 +167,58 @@ model Distribution {
   beneficiaryId String
   beneficiary   Beneficiary @relation(fields: [beneficiaryId], references: [id])
 
+  beneficiaryName          String
+  beneficiaryBankName      String?
+  beneficiaryAccountNumber String?
+  beneficiaryBankCode      String?
+
   amount   BigInt
   currency String
   status   PayoutStatus @default(PENDING)
 
+  payout Payout?
+
   providerReference String? @unique
   idempotencyKey    String  @unique
-
-  failureReason String?
+  failureReason     String?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([paymentId, beneficiaryId])
   @@index([paymentId])
   @@index([beneficiaryId])
   @@index([status])
 }
+
+
+model Payout {
+  id                String       @id @default(cuid())
+  merchantId        String
+  beneficiaryId     String
+  distributionId    String       @unique
+
+  reference         String       @unique
+  idempotencyKey    String       @unique
+
+  amount            BigInt
+  currency          String
+  status            PayoutStatus @default(PENDING)
+
+  providerReference String?
+  failureReason     String?
+
+  merchant          Merchant     @relation(fields: [merchantId], references: [id])
+  beneficiary       Beneficiary  @relation(fields: [beneficiaryId], references: [id])
+  distribution      Distribution @relation(fields: [distributionId], references: [id])
+
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  @@index([merchantId])
+  @@index([status])
+}
+
 
 model LedgerEntry {
   id        String  @id @default(cuid())

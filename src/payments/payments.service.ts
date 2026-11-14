@@ -4,15 +4,20 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { PaymentStatus, LedgerEntryType } from '@prisma/client';
+import {
+  PaymentStatus,
+  LedgerEntryType,
+  PayoutStatus,
+} from '@prisma/client';
 import { randomUUID } from 'crypto';
+
 import { PrismaService } from '../prisma/prisma.service';
 import { SplitCalculatorService } from '../split-rules/split-calculator.service';
 import { LedgerService } from '../ledger/ledger.service';
 import { CreatePaymentDto } from './dtos/create-payment.dto';
 import {
-  CheckoutRequest,
   PaymentProvider,
+  CheckoutRequest,
 } from './payment-provider.interface';
 
 @Injectable()
@@ -22,7 +27,7 @@ export class PaymentsService {
     private readonly calculator: SplitCalculatorService,
     private readonly ledger: LedgerService,
     private readonly provider: PaymentProvider,
-  ) { }
+  ) {}
 
   async create(merchantId: string, dto: CreatePaymentDto) {
     const merchant = await this.prisma.merchant.findUnique({
@@ -39,27 +44,49 @@ export class PaymentsService {
       );
     }
 
+    if (!Number.isSafeInteger(dto.amount) || dto.amount <= 0) {
+      throw new BadRequestException(
+        'Payment amount must be a positive integer in the smallest currency unit',
+      );
+    }
+
     const rule = dto.splitRuleId
       ? await this.prisma.splitRule.findFirst({
-        where: { id: dto.splitRuleId, merchantId },
-        include: {
-          items: { include: { beneficiary: true } },
-        },
-      })
+          where: {
+            id: dto.splitRuleId,
+            merchantId,
+          },
+          include: {
+            items: {
+              include: {
+                beneficiary: true,
+              },
+            },
+          },
+        })
       : await this.prisma.splitRule.findFirst({
-        where: { merchantId, isActive: true },
-        include: {
-          items: { include: { beneficiary: true } },
-        },
-      });
+          where: {
+            merchantId,
+            isActive: true,
+          },
+          include: {
+            items: {
+              include: {
+                beneficiary: true,
+              },
+            },
+          },
+        });
 
-    if (!rule || !rule.items.length) {
+    if (!rule || rule.items.length === 0) {
       throw new BadRequestException(
         'A valid split rule is required',
       );
     }
 
-    const types = new Set(rule.items.map((item) => item.splitType));
+    const types = new Set(
+      rule.items.map((item) => item.type),
+    );
 
     if (types.size !== 1) {
       throw new BadRequestException(
@@ -81,11 +108,11 @@ export class PaymentsService {
       }
     }
 
-    const splitType = rule.items[0].splitType;
+    const splitType = rule.items[0].type;
 
     if (splitType === 'PERCENTAGE') {
       const totalBasisPoints = rule.items.reduce(
-        (sum, item) => sum + item.value,
+        (sum, item) => sum + Number(item.value),
         0,
       );
 
@@ -95,8 +122,11 @@ export class PaymentsService {
         );
       }
 
-      // Paystack percentage shares are whole percentages.
-      if (rule.items.some((item) => item.value % 100 !== 0)) {
+      if (
+        rule.items.some(
+          (item) => Number(item.value) % 100 !== 0,
+        )
+      ) {
         throw new BadRequestException(
           'Paystack percentage splits must use whole percentages',
         );
@@ -108,8 +138,8 @@ export class PaymentsService {
       rule.items.map((item) => ({
         beneficiaryId: item.beneficiaryId,
         beneficiaryName: item.beneficiary.name,
-        splitType: item.splitType,
-        value: item.value,
+        splitType: item.type,
+        value: Number(item.value),
       })),
     );
 
@@ -135,50 +165,53 @@ export class PaymentsService {
         currency: dto.currency.toUpperCase(),
         customerEmail: dto.customerEmail,
         description: dto.description,
-        provider: 'paystack',
+        provider: this.provider.name,
         status: PaymentStatus.PENDING,
       },
     });
 
     const split = {
-      type: splitType === 'PERCENTAGE'
-        ? 'percentage' as const
-        : 'flat' as const,
+      type:
+        splitType === 'PERCENTAGE'
+          ? ('percentage' as const)
+          : ('flat' as const),
       bearer_type: 'account' as const,
       subaccounts: rule.items.map((item) => ({
         subaccount: item.beneficiary.paystackSubaccountCode!,
         share:
           splitType === 'PERCENTAGE'
-            ? item.value / 100
-            : item.value,
+            ? Number(item.value) / 100
+            : Number(item.value),
       })),
     };
 
     try {
-      const checkout = await this.paystack.initializeTransaction({
-        email: dto.customerEmail,
+      const checkoutRequest: CheckoutRequest = {
+        reference,
         amount: dto.amount,
         currency: dto.currency.toUpperCase(),
-        reference,
-        callbackUrl:
-          process.env.PAYSTACK_CALLBACK_URL ??
-          'http://localhost:3000/payments/callback',
+        customerEmail: dto.customerEmail,
         description: dto.description,
         split,
-      });
+      };
+
+      const checkout =
+        await this.provider.createCheckout(checkoutRequest);
 
       return this.prisma.payment.update({
         where: { id: payment.id },
         data: {
-          providerReference: checkout.reference,
-          checkoutUrl: checkout.authorization_url,
-          paystackAccessCode: checkout.access_code,
+          providerReference: checkout.providerReference,
+          checkoutUrl: checkout.checkoutUrl,
+          paystackAccessCode: checkout.accessCode,
         },
       });
     } catch (error) {
       await this.prisma.payment.update({
         where: { id: payment.id },
-        data: { status: PaymentStatus.FAILED },
+        data: {
+          status: PaymentStatus.FAILED,
+        },
       });
 
       throw error;
@@ -194,7 +227,8 @@ export class PaymentsService {
       throw new NotFoundException('Payment not found');
     }
 
-    const verified = await this.paystack.verifyTransaction(reference);
+    const verified =
+      await this.provider.verifyTransaction(reference);
 
     if (verified.status !== 'success') {
       throw new BadRequestException(
@@ -208,9 +242,11 @@ export class PaymentsService {
       );
     }
 
-    if (verified.currency.toUpperCase() !== payment.currency) {
+    if (
+      verified.currency.toUpperCase() !== payment.currency
+    ) {
       throw new BadRequestException(
-        'Verified Paystack currency does not match payment currency',
+        'Verified Paystack currency does not match the payment currency',
       );
     }
 
@@ -222,7 +258,13 @@ export class PaymentsService {
       where: { reference },
       include: {
         splitRule: {
-          include: { items: { include: { beneficiary: true } } },
+          include: {
+            items: {
+              include: {
+                beneficiary: true,
+              },
+            },
+          },
         },
         distributions: true,
       },
@@ -232,7 +274,7 @@ export class PaymentsService {
       throw new NotFoundException('Payment not found');
     }
 
-    if (payment.status === PaymentStatus.SUCCEEDED) {
+    if (payment.status === PaymentStatus.SUCCESSFUL) {
       return payment;
     }
 
@@ -243,7 +285,9 @@ export class PaymentsService {
     }
 
     if (!payment.splitRule) {
-      throw new BadRequestException('Payment has no associated split rule');
+      throw new BadRequestException(
+        'Payment has no associated split rule',
+      );
     }
 
     const allocations = this.calculator.calculate(
@@ -251,23 +295,32 @@ export class PaymentsService {
       payment.splitRule.items.map((item) => ({
         beneficiaryId: item.beneficiaryId,
         beneficiaryName: item.beneficiary.name,
-        splitType: item.splitType,
-        value: item.value,
+        splitType: item.type,
+        value: Number(item.value),
       })),
     );
 
-    // Store immutable beneficiary names and amounts against this payment.
-    // Future edits to the merchant's split rule won't change this snapshot.
     return this.prisma.$transaction(async (tx) => {
       const updated = await tx.payment.update({
         where: { id: payment.id },
         data: {
-          status: PaymentStatus.SUCCEEDED,
+          status: PaymentStatus.SUCCESSFUL,
           paidAt: new Date(),
         },
       });
 
       for (const allocation of allocations) {
+        const ruleItem = payment.splitRule!.items.find(
+          (item) =>
+            item.beneficiaryId === allocation.beneficiaryId,
+        );
+
+        if (!ruleItem) {
+          throw new BadRequestException(
+            `Split rule item not found for ${allocation.beneficiaryName}`,
+          );
+        }
+
         await tx.distribution.upsert({
           where: {
             paymentId_beneficiaryId: {
@@ -281,27 +334,26 @@ export class PaymentsService {
             beneficiaryName: allocation.beneficiaryName,
             amount: allocation.amount,
             currency: payment.currency,
-            status: 'PENDING',
+            status: PayoutStatus.PENDING,
+            idempotencyKey: `${payment.id}_${allocation.beneficiaryId}`,
           },
           update: {},
         });
 
         await tx.ledgerEntry.create({
           data: {
-            merchantId: payment.merchantId,
             paymentId: payment.id,
             type: LedgerEntryType.SPLIT_ALLOCATED,
             amount: allocation.amount,
             currency: payment.currency,
             description: `Allocation for ${allocation.beneficiaryName}`,
-            reference: payment.reference,
+            reference: `${payment.reference}_${allocation.beneficiaryId}`,
           },
         });
       }
 
       await tx.ledgerEntry.create({
         data: {
-          merchantId: payment.merchantId,
           paymentId: payment.id,
           type: LedgerEntryType.PAYMENT_RECEIVED,
           amount: payment.amount,
@@ -318,17 +370,27 @@ export class PaymentsService {
   async findAll(merchantId: string) {
     return this.prisma.payment.findMany({
       where: { merchantId },
-      include: { distributions: true },
-      orderBy: { createdAt: 'desc' },
+      include: {
+        distributions: true,
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
     });
   }
 
   async findOne(merchantId: string, id: string) {
     const payment = await this.prisma.payment.findFirst({
-      where: { id, merchantId },
+      where: {
+        id,
+        merchantId,
+      },
       include: {
         distributions: {
-          include: { beneficiary: true, payout: true },
+          include: {
+            beneficiary: true,
+            payout: true,
+          },
         },
       },
     });
