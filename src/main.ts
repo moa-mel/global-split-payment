@@ -1,9 +1,14 @@
 
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
+import { BigIntSerializerInterceptor } from './common/interceptors/bigint-serializer.interceptor';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+
+  app.useGlobalInterceptors(
+    new BigIntSerializerInterceptor(),
+  );
 
   const allowedOrigins = [
     'http://localhost:3000',
