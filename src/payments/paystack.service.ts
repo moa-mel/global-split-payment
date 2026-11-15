@@ -6,6 +6,15 @@ import {
   InternalServerErrorException,
 } from '@nestjs/common';
 
+import {
+  PaymentProvider,
+  CheckoutRequest,
+  CheckoutResult,
+  VerifiedTransaction,
+  TransferRequest,
+  TransferResult,
+} from './payment-provider.interface';
+
 interface PaystackResponse<T> {
   status: boolean;
   message: string;
@@ -13,7 +22,9 @@ interface PaystackResponse<T> {
 }
 
 @Injectable()
-export class PaystackService {
+export class PaystackService implements PaymentProvider {
+  readonly name = 'PAYSTACK' as const;
+
   private readonly secretKey = process.env.PAYSTACK_SECRET_KEY;
 
   private readonly paystackApiUrl = (
@@ -69,8 +80,6 @@ export class PaystackService {
       const message =
         result?.message || 'Paystack request failed';
 
-      // Account and bank validation errors should be reported
-      // as client validation errors, not generic gateway errors.
       if (
         /account number|account name|bank code|bank details|resolve account|settlement bank/i.test(
           message,
@@ -86,8 +95,95 @@ export class PaystackService {
   }
 
   /**
-   * Resolve a Nigerian bank account using its account number
-   * and Paystack bank code.
+   * Create a checkout session through Paystack.
+   * This is the method PaymentsService expects.
+   */
+  async createCheckout(
+    input: CheckoutRequest,
+  ): Promise<CheckoutResult> {
+    if (!input.customerEmail) {
+      throw new BadRequestException(
+        'Customer email is required by Paystack.',
+      );
+    }
+
+    if (
+      !Number.isSafeInteger(input.amount) ||
+      input.amount <= 0
+    ) {
+      throw new BadRequestException(
+        'Payment amount must be a positive integer.',
+      );
+    }
+
+    const result = await this.initializeTransaction({
+      email: input.customerEmail,
+      amount: input.amount,
+      currency: input.currency,
+      reference: input.reference,
+      description: input.description,
+      split: input.split,
+      callbackUrl: process.env.PAYSTACK_CALLBACK_URL,
+    });
+
+    return {
+      providerReference: result.reference,
+      checkoutUrl: result.authorization_url,
+      accessCode: result.access_code,
+    };
+  }
+
+  /**
+   * Initialize a Paystack transaction.
+   */
+  async initializeTransaction(input: {
+    email: string;
+    amount: number;
+    currency: string;
+    reference: string;
+    callbackUrl?: string;
+    description?: string;
+    split?: CheckoutRequest['split'];
+  }) {
+    return this.request<{
+      authorization_url: string;
+      access_code: string;
+      reference: string;
+    }>('/transaction/initialize', 'POST', {
+      email: input.email,
+      amount: input.amount,
+      currency: input.currency,
+      reference: input.reference,
+
+      ...(input.callbackUrl
+        ? { callback_url: input.callbackUrl }
+        : {}),
+
+      metadata: {
+        description: input.description,
+        splitflow_reference: input.reference,
+      },
+
+      ...(input.split
+        ? { split: input.split }
+        : {}),
+    });
+  }
+
+  /**
+   * Verify a transaction with Paystack.
+   */
+  async verifyTransaction(
+    reference: string,
+  ): Promise<VerifiedTransaction> {
+    return this.request<VerifiedTransaction>(
+      `/transaction/verify/${encodeURIComponent(reference)}`,
+      'GET',
+    );
+  }
+
+  /**
+   * Resolve a Nigerian bank account.
    */
   async resolveAccount(input: {
     accountNumber: string;
@@ -157,52 +253,82 @@ export class PaystackService {
     });
   }
 
-  async initializeTransaction(input: {
-    email: string;
-    amount: number;
-    currency: string;
-    reference: string;
-    callbackUrl: string;
-    description?: string;
-    split: {
-      type: 'percentage' | 'flat';
-      bearer_type: 'account';
-      subaccounts: Array<{
-        subaccount: string;
-        share: number;
-      }>;
-    };
-  }) {
-    return this.request<{
-      authorization_url: string;
-      access_code: string;
-      reference: string;
-    }>('/transaction/initialize', 'POST', {
-      email: input.email,
-      amount: input.amount,
-      currency: input.currency,
-      reference: input.reference,
-      callback_url: input.callbackUrl,
-      metadata: {
-        description: input.description,
-        splitflow_reference: input.reference,
-      },
-      split: input.split,
-    });
-  }
+  /**
+   * Create a transfer recipient and initiate a Paystack transfer.
+   */
+  async initiateTransfer(
+    input: TransferRequest,
+  ): Promise<TransferResult> {
+    if (
+      !Number.isSafeInteger(input.amount) ||
+      input.amount <= 0
+    ) {
+      throw new BadRequestException(
+        'Transfer amount must be a positive integer.',
+      );
+    }
 
-  async verifyTransaction(reference: string) {
-    return this.request<{
-      status: string;
+    const accountNumber = String(input.accountNumber).trim();
+    const bankCode = String(input.bankCode).trim();
+
+    if (!/^\d{10}$/.test(accountNumber)) {
+      throw new BadRequestException(
+        'Account number must contain exactly 10 digits.',
+      );
+    }
+
+    if (!bankCode) {
+      throw new BadRequestException('Bank code is required.');
+    }
+
+    const recipient = await this.request<{
+      recipient_code: string;
+      name: string;
+    }>('/transferrecipient', 'POST', {
+      type: 'nuban',
+      name: input.beneficiaryName,
+      account_number: accountNumber,
+      bank_code: bankCode,
+      currency: input.currency,
+    });
+
+    const transfer = await this.request<{
+      transfer_code: string;
       reference: string;
-      amount: number;
-      currency: string;
-      gateway_response: string;
-      paid_at: string | null;
-      metadata: unknown;
-    }>(
-      `/transaction/verify/${encodeURIComponent(reference)}`,
-      'GET',
-    );
+      status: string;
+    }>('/transfer', 'POST', {
+      source: 'balance',
+      amount: input.amount,
+      recipient: recipient.recipient_code,
+      reference: input.reference,
+      reason: `SplitFlow payout to ${input.beneficiaryName}`,
+    });
+
+    const status = transfer.status.toLowerCase();
+
+    let normalizedStatus: TransferResult['status'];
+
+    switch (status) {
+      case 'success':
+        normalizedStatus = 'SUCCESSFUL';
+        break;
+
+      case 'failed':
+      case 'reversed':
+        normalizedStatus = 'FAILED';
+        break;
+
+      case 'pending':
+      case 'otp':
+      case 'processing':
+      default:
+        normalizedStatus = 'PENDING';
+        break;
+    }
+
+    return {
+      providerReference: transfer.reference || input.reference,
+      status: normalizedStatus,
+    };
   }
 }

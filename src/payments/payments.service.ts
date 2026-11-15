@@ -169,7 +169,7 @@ export class PaymentsService {
         currency: dto.currency.toUpperCase(),
         customerEmail: dto.customerEmail,
         description: dto.description,
-        provider: PAYMENT_PROVIDER,
+        provider: this.paymentProvider.name,
         status: PaymentStatus.PENDING,
       },
     });
